@@ -1,9 +1,9 @@
 import { Pool, types, type PoolClient, type QueryResultRow } from 'pg';
+import { env } from './env';
 
 /* DATE columns come back as plain 'YYYY-MM-DD' strings instead of JS Dates.
    Race days have no time zone, and this keeps them from shifting by a day. */
 types.setTypeParser(1082, (value: string) => value);
-import { env } from './env';
 
 /* One pool per process. In development Next reloads modules, so it is cached on globalThis. */
 const globalForDb = globalThis as unknown as { scPool?: Pool };
@@ -15,26 +15,53 @@ export const pool: Pool =
     ssl: env.databaseSsl ? { rejectUnauthorized: false } : undefined,
     max: 10,
     idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 5_000,
+    connectionTimeoutMillis: 10_000,
   });
 
 if (!env.isProd) globalForDb.scPool = pool;
 
 pool.on('error', (err) => console.error('[db] idle client error', err));
 
-export async function all<R extends QueryResultRow>(sql: string, params: unknown[] = []): Promise<R[]> {
-  const res = await pool.query<R>(sql, params as never[]);
+/** Query parameters are plain values; pg types them loosely, so they are widened here once. */
+type Params = unknown[];
+const args = (params: Params) => params as unknown as never[];
+
+export async function all<R extends QueryResultRow>(sql: string, params: Params = []): Promise<R[]> {
+  const res = await pool.query<R>(sql, args(params));
   return res.rows;
 }
 
-export async function one<R extends QueryResultRow>(sql: string, params: unknown[] = []): Promise<R | null> {
+export async function one<R extends QueryResultRow>(sql: string, params: Params = []): Promise<R | null> {
   const rows = await all<R>(sql, params);
-  return rows[0] ?? null;
+  return rows.length > 0 ? rows[0] : null;
 }
 
-export async function run(sql: string, params: unknown[] = []): Promise<number> {
-  const res = await pool.query(sql, params as never[]);
+export async function run(sql: string, params: Params = []): Promise<number> {
+  const res = await pool.query(sql, args(params));
   return res.rowCount ?? 0;
+}
+
+export type TxClient = {
+  all<R extends QueryResultRow>(sql: string, params?: Params): Promise<R[]>;
+  one<R extends QueryResultRow>(sql: string, params?: Params): Promise<R | null>;
+  run(sql: string, params?: Params): Promise<number>;
+};
+
+function wrap(client: PoolClient): TxClient {
+  return {
+    async all<R extends QueryResultRow>(sql: string, params: Params = []): Promise<R[]> {
+      const res = await client.query<R>(sql, args(params));
+      return res.rows;
+    },
+    async one<R extends QueryResultRow>(sql: string, params: Params = []): Promise<R | null> {
+      const res = await client.query<R>(sql, args(params));
+      return res.rows.length > 0 ? res.rows[0] : null;
+    },
+    async run(sql: string, params: Params = []): Promise<number> {
+      const res = await client.query(sql, args(params));
+      return res.rowCount ?? 0;
+    },
+  };
 }
 
 /** Runs the callback inside a transaction. Rolls back on any error. */
@@ -51,20 +78,6 @@ export async function tx<T>(fn: (client: TxClient) => Promise<T>): Promise<T> {
   } finally {
     client.release();
   }
-}
-
-export type TxClient = {
-  all: <R extends QueryResultRow>(sql: string, params?: unknown[]) => Promise<R[]>;
-  one: <R extends QueryResultRow>(sql: string, params?: unknown[]) => Promise<R | null>;
-  run: (sql: string, params?: unknown[]) => Promise<number>;
-};
-
-function wrap(client: PoolClient): TxClient {
-  return {
-    all: async <R extends QueryResultRow>(sql: string, params: unknown[] = []) => (await client.query<R>(sql, params as never[])).rows,
-    one: async <R extends QueryResultRow>(sql: string, params: unknown[] = []) => (await client.query<R>(sql, params as never[])).rows[0] ?? null,
-    run: async (sql: string, params: unknown[] = []) => (await client.query(sql, params as never[])).rowCount ?? 0,
-  };
 }
 
 /** Postgres unique-violation code, used to turn duplicates into friendly 409s. */
