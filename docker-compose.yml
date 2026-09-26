@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: superchampion
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: superchampion
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      # Lets you run "npm run dev" on your own machine against this database.
+      # Remove this line on the server if nothing outside Docker needs the database.
+      - '127.0.0.1:5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U superchampion']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://superchampion:${DB_PASSWORD}@db:5432/superchampion
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      TRUST_PROXY: '1'
+      SITE_URL: ${SITE_URL:-http://localhost:3000}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_NAME: ${ADMIN_NAME:-Admin}
+    ports:
+      - '127.0.0.1:3000:3000'
+
+volumes:
+  db-data:
